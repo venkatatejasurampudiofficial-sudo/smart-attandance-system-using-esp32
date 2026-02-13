@@ -1,0 +1,196 @@
+#include <Adafruit_Fingerprint.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
+
+// WiFi credentials
+const char* ssid = "RGV";          // Replace with your WiFi SSID
+const char* password = "12345678";  // Replace with your WiFi password
+
+// Google Apps Script Web App URL
+const char* serverURL = "https://script.google.com/macros/s/AKfycbyDjWqehojU-zYlvEnV4OgBeUuEORrlzHZ2voPhk2AixW1H1PPVFSXLXHxNUHO-81K1dA/exec?name"; // Replace with your Web App URL
+
+// Pins for R307 fingerprint sensor
+#define RX_PIN 19
+#define TX_PIN 18
+
+// Output Pins for Activation
+#define PIN_D26 26
+#define PIN_D32 32
+
+// HardwareSerial connection for fingerprint sensor
+HardwareSerial mySerial(2);
+Adafruit_Fingerprint finger = Adafruit_Fingerprint(&mySerial);
+
+// NTP client to get current time (IST = UTC +5:30)
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 19800, 60000); // Offset: 19800 sec (5 hrs 30 min)
+
+void setup() {
+  Serial.begin(115200);
+  mySerial.begin(57600, SERIAL_8N1, RX_PIN, TX_PIN);
+
+  // Set output pins for relay or indicator activation
+  pinMode(PIN_D26, OUTPUT);
+  pinMode(PIN_D32, OUTPUT);
+  digitalWrite(PIN_D26, LOW);
+  digitalWrite(PIN_D32, LOW);
+
+  // Connect to WiFi
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi...");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.print(".");
+  }
+  Serial.println("\nConnected to WiFi!");
+
+  // Initialize fingerprint sensor
+  if (finger.verifyPassword()) {
+    Serial.println("Fingerprint sensor found!");
+  } else {
+    Serial.println("Fingerprint sensor not found!");
+    while (true); // Halt execution
+  }
+
+  // Initialize NTP client
+  timeClient.begin();
+
+  // Synchronize time
+  Serial.print("Waiting for NTP time sync...");
+  while (!timeClient.update()) {
+    timeClient.forceUpdate();
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nNTP time synchronized!");
+}
+
+void loop() {
+  recognizeFingerprint(); // Continuously scan for fingerprints
+}
+
+// Function to recognize fingerprint and control pins
+void recognizeFingerprint() {
+  Serial.println("Place your finger on the sensor...");
+  
+  int id = finger.getImage();
+  if (id == FINGERPRINT_OK) {
+    id = finger.image2Tz();
+    if (id == FINGERPRINT_OK) {
+      id = finger.fingerFastSearch();
+      if (id == FINGERPRINT_OK) {
+        Serial.print("Fingerprint recognized! ID: ");
+        Serial.println(finger.fingerID);
+        
+        // Activate PIN_D26 (HIGH for recognized attendance)
+        digitalWrite(PIN_D26, HIGH);
+        digitalWrite(PIN_D32, LOW); // Ensure PIN_D32 is LOW
+        delay(2000); // Keep PIN_D26 HIGH for 2 seconds
+        digitalWrite(PIN_D26, LOW);
+        
+        // Call markAttendance with recognized ID
+        switch (finger.fingerID) {
+          case 3:
+            markAttendance(finger.fingerID, "THARUN");
+            break;
+          case 11:
+            markAttendance(finger.fingerID, "naveen kumar");
+            break;
+          case 2:
+            markAttendance(finger.fingerID, "CHAITANYA THARUN");
+            break;
+          case 4:
+            markAttendance(finger.fingerID, "ANUSHA");
+            break;
+          case 5:
+            markAttendance(finger.fingerID, "SANTHOSHINI");
+            break;
+           case 7:
+            markAttendance(finger.fingerID, "ENOS");
+            break;
+            case 6:
+            markAttendance(finger.fingerID, "ANIL HEMENDRA");
+            break;
+            case 9:
+            markAttendance(finger.fingerID, "SRIVALLI");
+            break;
+            case 8:
+            markAttendance(finger.fingerID, "SIVA KUMAR");
+            break;      
+          default:
+            Serial.println("Unregistered ID detected.");
+            break;
+        }
+      } else {
+        Serial.println("Fingerprint not recognized.");
+        // Activate PIN_D32 (HIGH for unrecognized attendance)
+        digitalWrite(PIN_D32, HIGH);
+        digitalWrite(PIN_D26, LOW); // Ensure PIN_D26 is LOW
+        delay(2000); // Keep PIN_D32 HIGH for 2 seconds
+        digitalWrite(PIN_D32, LOW);
+      }
+    }
+  }
+}
+
+// Function to mark attendance and send data to Google Sheets
+void markAttendance(uint16_t studentID, const char* studentName) {
+  // Get current date and time
+  timeClient.update();
+  String timestamp = getFormattedDateTime();
+
+  Serial.print("Attendance marked for ");
+  Serial.print(studentName);
+  Serial.print(" at ");
+  Serial.println(timestamp);
+
+  // Sending attendance data to Google Sheets
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(serverURL);
+    http.addHeader("Content-Type", "application/json");
+
+    // Create JSON payload
+    String jsonPayload = "{\"id\": \"" + String(studentID) + 
+                         "\", \"name\": \"" + String(studentName) + 
+                         "\", \"timestamp\": \"" + timestamp + "\"}";
+
+    // Send POST request
+    int httpResponseCode = http.POST(jsonPayload);
+    if (httpResponseCode > 0) {
+      Serial.println("Attendance synced successfully.");
+    } else {
+      Serial.print("Failed to sync attendance. HTTP Error: ");
+      Serial.println(httpResponseCode);
+    }
+    http.end();
+  } else {
+    Serial.println("WiFi not connected.");
+  }
+}
+
+// Function to get formatted date and time in YYYY-MM-DD HH:MM:SS
+String getFormattedDateTime() {
+  timeClient.update(); // Ensure the NTP client retrieves the latest time
+  unsigned long epochTime = timeClient.getEpochTime(); // Get the current epoch time
+
+  if (epochTime == 0) {
+    Serial.println("Failed to get valid time from NTP");
+    return "Invalid Time";
+  }
+
+  // Convert epoch time to a time structure
+  time_t rawTime = (time_t)epochTime;
+  struct tm timeInfo;
+  gmtime_r(&rawTime, &timeInfo); // Use gmtime_r for thread safety
+
+  // Format: YYYY-MM-DD HH:MM:SS
+  char buffer[30];
+  sprintf(buffer, "%04d-%02d-%02d %02d:%02d:%02d",
+          timeInfo.tm_year + 1900, timeInfo.tm_mon + 1, timeInfo.tm_mday,
+          timeInfo.tm_hour, timeInfo.tm_min, timeInfo.tm_sec);
+
+  return String(buffer);
+}
